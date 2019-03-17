@@ -10,7 +10,10 @@ function New-Map {
         $MapWidth = 10,
         [Parameter(Mandatory = $false)]
         [Int]
-        $MapHeight = 10
+        $MapHeight = 10,
+        [Parameter(Mandatory = $false)]
+        [Int]
+        $Randomness = 3
     )
 
     process {
@@ -20,11 +23,11 @@ function New-Map {
 
         # Create Map Key and Quantities
         $MapKey = @{
-            Chest    = @("C", (Get-Random -Minimum 1 -Maximum 3))
+            Chest    = @("C", (Get-Random -Minimum 1 -Maximum (($MapWidth * $MapHeight) / (($MapWidth + $MapHeight) / 2))))
             Exit     = @("X", 1)
             Entrance = @("N", 1)
             Player   = @("P", 0) # Set to 0 as player is populated later
-            Enemy    = @("E", (Get-Random -Minimum 4 -Maximum 10))
+            Enemy    = @("E", 0) # Set to 0 as enemies are random events
             Wall     = @("W", 0) # Set to 0 as walls are created later
         }
 
@@ -51,50 +54,64 @@ function New-Map {
             }
         }
 
+        # Place path between entrance and exit
         Write-Verbose -Message "Generating Paths"
-        New-MapPaths
+        New-MapPaths -Randomness $Randomness
 
+        # Fill in non-path blocks with walls
         Write-Verbose -Message "Generating Walls"
         New-MapWalls
 
         # Place player at entrance
-        $global:Map[$EntranceLocation[0], $EntranceLocation[1]] = @((@("P") + ($global:Map[$EntranceLocation[0], $EntranceLocation[1]])[0]), ($global:Map[$EntranceLocation[0], $EntranceLocation[1]])[1], ($global:Map[$EntranceLocation[0], $EntranceLocation[1]])[2])
+        $global:Map[$EntranceLocation] = @((@("P") + $global:Map[$EntranceLocation][0]), $global:Map[$EntranceLocation][1], $global:Map[$EntranceLocation][2])
+
+        # Clear fog of war around player
+        Clear-FogOfWar -FogClearRadius 1
     }
 }
 
 
 function Write-Map {
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter(Mandatory = $false)]
+        [Switch]
+        $IgnoreFog
+    )
 
     process {
         # Retrieve map height and width from map array
-        $MapWidth = $global:Map.GetLength(0)
-        $MapHeight = $global:Map.GetLength(1)
+        $MapSize = @($global:Map.GetLength(0), $global:Map.GetLength(1))
 
         # Define common lines
-        $Border = "+" + ("-------+" * $MapWidth)
-        $EmptyLine = "|" + ("       |" * $MapWidth)
+        $Border = "+" + ("-------+" * $MapSize[0])
 
-        for ($YCoord = 0; $YCoord -lt $MapHeight; $YCoord++) {
+        for ($YCoord = 0; $YCoord -lt $MapSize[1]; $YCoord++) {
             if ($YCoord -eq 0) {
                 Write-Output -InputObject $Border
-                Write-Output -InputObject $EmptyLine
             }
-            $Line = "|"
-            for ($XCoord = 0; $XCoord -lt $MapWidth; $XCoord++) {
-                $Line += "   " + ($global:Map[$XCoord, $YCoord])[0][0] + "   |"
+
+            $Line1 = "|"; $Line2 = "|"; $Line3 = "|"
+            for ($XCoord = 0; $XCoord -lt $MapSize[0]; $XCoord++) {
+                if ((($global:Map[$XCoord, $YCoord])[2] -eq 1) -or $IgnoreFog) {
+                    if (($global:Map[$XCoord, $YCoord])[0][0] -eq "W") {
+                        $Line1 += "WWWWWWW|"; $Line2 += "WWWWWWW|"; $Line3 += "WWWWWWW|"
+                    }
+                    else {
+                        $Line1 += "       |"
+                        $Line2 += "   " + ($global:Map[$XCoord, $YCoord])[0][0] + "   |"
+                        $Line3 += "       |"
+                    }
+                }
+                else {
+                    $Line1 += "F F F F|"; $Line2 += "F F F F|"; $Line3 += "F F F F|"
+                }
             }
-            Write-Output -InputObject $Line
-            if ($YCoord -ne ($MapWidth - 1)) {
-                Write-Output -InputObject $EmptyLine
-                Write-Output -InputObject $Border
-                Write-Output -InputObject $EmptyLine
-            }
-            else {
-                Write-Output -InputObject $EmptyLine
-                Write-Output -InputObject $Border
-            }
+
+            Write-Output -InputObject $Line1
+            Write-Output -InputObject $Line2
+            Write-Output -InputObject $Line3
+            Write-Output -InputObject $Border
         }
     }
 }
@@ -110,32 +127,24 @@ function Write-Minimap {
         [Parameter(Mandatory = $false)]
         [ValidateScript( { if (($_ % 2) -eq 0) {$true} else {$false} })]
         [Int]
-        $MiniMapHeight = 3
+        $MiniMapHeight = 3,
+        [Parameter(Mandatory = $false)]
+        [Switch]
+        $IgnoreFog
     )
 
     process {
         # Retrieve map height and width from map array
-        $MapWidth = $global:Map.GetLength(0)
-        $MapHeight = $global:Map.GetLength(1)
+        $MapSize = @($global:Map.GetLength(0), $global:Map.GetLength(1))
 
-        # Locate player on map
-        for ($YCoord = 0; $YCoord -lt $MapHeight; $YCoord++) {
-            for ($XCoord = 0; $XCoord -lt $MapWidth; $XCoord++) {
-                if ($global:Map[$XCoord, $YCoord][0][0] -eq "P") {
-                    $PlayerLocation = @($XCoord, $YCoord)
-                    break
-                }
-            }
-            if ($PlayerLocation) {
-                break
-            }
-        }
+        # Get player location
+        $PlayerLocation = Find-Player
 
         # Define minimap boundaries
-        $MinimapLeftBoundary = $XCoord - (($MiniMapWidth - 1) / 2)
-        $MiniMapRightBoundary = $XCoord + (($MiniMapWidth - 1) / 2)
-        $MiniMapTopBoundary = $YCoord - (($MiniMapHeight - 1) / 2)
-        $MiniMapBottomBoundary = $YCoord + (($MiniMapHeight - 1) / 2)
+        $MinimapLeftBoundary = $PlayerLocation[0] - (($MiniMapWidth - 1) / 2)
+        $MiniMapRightBoundary = $PlayerLocation[0] + (($MiniMapWidth - 1) / 2)
+        $MiniMapTopBoundary = $PlayerLocation[1] - (($MiniMapHeight - 1) / 2)
+        $MiniMapBottomBoundary = $PlayerLocation[1] + (($MiniMapHeight - 1) / 2)
 
         # Validate if the player is at the edge of the map
         ## X-Axis validation
@@ -145,8 +154,8 @@ function Write-Minimap {
                 $MiniMapRightBoundary++
             }
         }
-        elseif ($MiniMapRightBoundary -gt $MapWidth) {
-            while ($MiniMapRightBoundary -gt $MapWidth) {
+        elseif ($MiniMapRightBoundary -gt $MapSize[0]) {
+            while ($MiniMapRightBoundary -gt $MapSize[0]) {
                 $MiniMapLeftBoundary--
                 $MiniMapRightBoundary--
             }
@@ -159,37 +168,37 @@ function Write-Minimap {
                 $MiniMapBottomBoundary++
             }
         }
-        elseif ($MiniMapBottomBoundary -gt $MapWidth) {
-            while ($MiniMapBottomBoundary -gt $MapWidth) {
+        elseif ($MiniMapBottomBoundary -gt $MapSize[1]) {
+            while ($MiniMapBottomBoundary -gt $MapSize[1]) {
                 $MiniMapTopBoundary--
                 $MiniMapBottomBoundary--
             }
         }
 
-        # Define common lines
+        # Define border line
         $Border = "+" + ("-------+" * $MiniMapWidth)
-        $EmptyLine = "|" + ("       |" * $MiniMapWidth)
 
         # Print minimap
         for ($YCoord = $MiniMapTopBoundary; $YCoord -le $MiniMapBottomBoundary; $YCoord++) {
             if ($YCoord -eq $MiniMapTopBoundary) {
                 Write-Output -InputObject $Border
-                Write-Output -InputObject $EmptyLine
             }
-            $Line = "|"
+
+            $Line1 = "|"; $Line2 = "|"; $Line3 = "|"
             for ($XCoord = $MinimapLeftBoundary; $XCoord -le $MiniMapRightBoundary; $XCoord++) {
-                $Line += "   " + ($global:Map[$XCoord, $YCoord])[0][0] + "   |"
+                if (($global:Map[$XCoord, $YCoord])[0][0] -eq "W") {
+                    $Line1 += "WWWWWWW|"; $Line2 += "WWWWWWW|"; $Line3 += "WWWWWWW|"
+                }
+                else {
+                    $Line1 += "       |"
+                    $Line2 += "   " + ($global:Map[$XCoord, $YCoord])[0][0] + "   |"
+                    $Line3 += "       |"
+                }
             }
-            Write-Output -InputObject $Line
-            if ($YCoord -ne ($MiniMapBottomBoundary)) {
-                Write-Output -InputObject $EmptyLine
-                Write-Output -InputObject $Border
-                Write-Output -InputObject $EmptyLine
-            }
-            else {
-                Write-Output -InputObject $EmptyLine
-                Write-Output -InputObject $Border
-            }
+            Write-Output -InputObject $Line1
+            Write-Output -InputObject $Line2
+            Write-Output -InputObject $Line3
+            Write-Output -InputObject $Border
         }
     }
 }
@@ -197,16 +206,16 @@ function Write-Minimap {
 function New-MapPaths {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $false)]
+        [Parameter(Mandatory = $true)]
         [Int]
-        $Randomness = 3
+        $Randomness
     )
 
     process {
         # Retrieve map height and width from map array
         $MapSize = @($global:Map.GetLength(0), $global:Map.GetLength(1))
 
-        # Locate player and exit
+        # Locate entrance and exit
         for ($YCoord = 0; $YCoord -lt $MapSize[1]; $YCoord++) {
             for ($XCoord = 0; $XCoord -lt $MapSize[0]; $XCoord++) {
                 if ($global:Map[$XCoord, $YCoord]) {
@@ -236,13 +245,13 @@ function New-MapPaths {
 
             # Randomise amount to move
             if ($Diff[$AxisToMove] -gt 0) {
-                $DistanceToMove = Get-Random -Minimum (0 - ($Randomness * 2)) -Maximum (0 + [Int]($Randomness / 2))
+                $DistanceToMove = Get-Random -Minimum (0 - ($Randomness * 2)) -Maximum (0 + $Randomness)
             }
             elseif ($Diff[$AxisToMove] -lt 0) {
-                $DistanceToMove = Get-Random -Minimum (0 - [Int]($Randomness / 2)) -Maximum (0 + ($Randomness * 2))
+                $DistanceToMove = Get-Random -Minimum (0 - $Randomness / 2) -Maximum (0 + ($Randomness * 2))
             }
             else {
-                $DistanceToMove = Get-Random -Minimum (0 - [Int]($Randomness / 3)) -Maximum (0 + [Int]($Randomness / 3))
+                $DistanceToMove = Get-Random -Minimum (0 - $Randomness) -Maximum (0 + $Randomness)
             }
 
             if (-not (($PathCoord[$AxisToMove] + $DistanceToMove) -ge $MapSize[$AxisToMove] -or ($PathCoord[$AxisToMove] + $DistanceToMove) -lt 0)) {
@@ -286,15 +295,134 @@ function New-MapWalls {
 
     process {
         # Retrieve map height and width from map array
-        $MapWidth = $global:Map.GetLength(0)
-        $MapHeight = $global:Map.GetLength(1)
+        $MapSize = @($global:Map.GetLength(0), $global:Map.GetLength(1))
 
-        for ($YCoord = 0; $YCoord -lt $MapHeight; $YCoord++) {
-            for ($XCoord = 0; $XCoord -lt $MapWidth; $XCoord++) {
+        for ($YCoord = 0; $YCoord -lt $MapSize[1]; $YCoord++) {
+            for ($XCoord = 0; $XCoord -lt $MapSize[0]; $XCoord++) {
                 if (-not $global:Map[$XCoord, $YCoord]) {
                     $global:Map[$XCoord, $YCoord] = @(@("W"), 0, 0)
                 }
             }
+        }
+    }
+}
+
+
+function Clear-FogOfWar {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false)]
+        [Int]
+        $FogClearRadius = 1,
+        [Parameter(Mandatory = $false)]
+        [Object[]]
+        $PassedLocation
+    )
+
+    process {
+        # Retrieve map height and width from map array
+        $MapSize = @($global:Map.GetLength(0), $global:Map.GetLength(1))
+
+        if ($PassedLocation) {
+            $PlayerLocation = $PassedLocation
+        }
+        else {
+            # Get player location
+            $PlayerLocation = Find-Player
+        }
+
+        # Define fog clearing boundary
+        $FogLeftBoundary = $PlayerLocation[0] - $FogClearRadius
+        $FogRightBoundary = $PlayerLocation[0] + $FogClearRadius
+        $FogTopBoundary = $PlayerLocation[1] - $FogClearRadius
+        $FogBottomBoundary = $PlayerLocation[1] + $FogClearRadius
+
+        # Clear fog around player
+        for ($YCoord = $FogTopBoundary; $YCoord -le $FogBottomBoundary; $YCoord++) {
+            for ($XCoord = $FogLeftBoundary; $XCoord -le $FogRightBoundary; $XCoord++) {
+                if (-not (($XCoord -lt 0 -or $XCoord -ge $MapSize[0]) -or ($YCoord -lt 0 -or $YCoord -ge $MapSize[1]))) {
+                    if (($global:Map[$XCoord, $YCoord])[2] -eq "0") {
+                        $global:Map[$XCoord, $YCoord] = @($global:Map[$XCoord, $YCoord][0], $global:Map[$XCoord, $YCoord][1], 1)
+                        Write-Debug -Message "Fog cleared at Coordinates $XCoord, $YCoord"
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+function Find-Player {
+    [CmdletBinding()]
+    param ()
+
+    process {
+        # Retrieve map height and width from map array
+        $MapSize = @($global:Map.GetLength(0), $global:Map.GetLength(1))
+
+        # Locate player on map
+        for ($YCoord = 0; $YCoord -lt $MapSize[1]; $YCoord++) {
+            for ($XCoord = 0; $XCoord -lt $MapSize[0]; $XCoord++) {
+                if ($global:Map[$XCoord, $YCoord][0][0] -eq "P") {
+                    $PlayerLocation = @($XCoord, $YCoord)
+                    break
+                }
+            }
+            if ($PlayerLocation) {
+                break
+            }
+        }
+        return $PlayerLocation
+    }
+}
+
+
+function Move-Player {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Up", "Down", "Left", "Right")]
+        [String]
+        $Direction
+    )
+
+    process {
+        # Retrieve map height and width from map array
+        $MapSize = @($global:Map.GetLength(0), $global:Map.GetLength(1))
+
+        # Get player location
+        $PlayerLocation = Find-Player
+
+        # Validate if the player can move to that space
+        switch ($Direction) {
+            "Left" { $AxisToMove = 0; $Distance = -1 }
+            "Right" { $AxisToMove = 0; $Distance = 1 }
+            "Up" { $AxisToMove = 1; $Distance = -1 }
+            "Down" { $AxisToMove = 1; $Distance = 1 }
+        }
+        Write-Debug -Message "Moving $Distance on axis $AxisToMove"
+
+        # Calculate the new location for the player
+        $NewPlayerLocation = @($PlayerLocation[0], $PlayerLocation[1])
+        $NewPlayerLocation[$AxisToMove] += $Distance
+
+        if (($NewPlayerLocation[$AxisToMove] -lt 0) -or ($NewPlayerLocation[$AxisToMove] -ge $MapSize[$AxisToMove])) {
+            Write-Output -InputObject "Can't move outside of the map edge..."
+        }
+        elseif ($global:Map[$NewPlayerLocation][0][0] -eq "W") {
+            Write-Output -InputObject "Can't move through walls.... You're not a ghost...."
+        }
+        else {
+            # Set new player location
+            $global:Map[$NewPlayerLocation] = @((@("P") + $global:Map[$NewPlayerLocation][0]), $global:Map[$NewPlayerLocation][1], $global:Map[$NewPlayerLocation][2])
+            Write-Debug -Message "Moved player to co-ordinates $($NewPlayerLocation[0]), $($NewPlayerLocation[1])"
+
+            # Remove player from previous location
+            $global:Map[$PlayerLocation] = @($global:Map[$PlayerLocation][0][1..-1], $global:Map[$PlayerLocation][1], $global:Map[$PlayerLocation][2])
+            Write-Debug -Message "Removed player from co-ordinates $($PlayerLocation[0]), $($PlayerLocation[1])"
+
+            # Clear fog of war around new player location
+            Clear-FogOfWar -FogClearRadius 1 -PassedLocation $NewPlayerLocation
         }
     }
 }
